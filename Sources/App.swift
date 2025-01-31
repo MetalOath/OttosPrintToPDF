@@ -9,7 +9,7 @@ struct OttosPrintToPDFApp: App {
             ContentView()
                 .frame(minWidth: 400, maxWidth: 400, minHeight: 500, maxHeight: 500)
         }
-        .windowResizability(.contentSize)
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) { }  // Disable New menu item
         }

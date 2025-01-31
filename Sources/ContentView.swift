@@ -29,7 +29,7 @@ struct ContentView: View {
             }
             .padding()
             .background(RoundedRectangle(cornerRadius: 10)
-                .fill(Color(.systemBackground))
+                .fill(Color(NSColor.windowBackgroundColor))
                 .shadow(radius: 2))
             
             if !printerManager.isInstalled {

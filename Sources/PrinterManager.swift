@@ -1,6 +1,6 @@
 import Foundation
-import CUPS
 import AppKit
+import UniformTypeIdentifiers
 
 class PrinterManager: ObservableObject {
     static let shared = PrinterManager()
@@ -14,18 +14,27 @@ class PrinterManager: ObservableObject {
     private let configFile = "/etc/cups/cups-pdf.conf"
     
     private var fileManager = FileManager.default
+    private let cupsQueue = DispatchQueue(label: "com.otto.printopdf.cups")
     
     init() {
         checkPrinterInstallation()
     }
     
     private func checkPrinterInstallation() {
-        do {
-            let printers = try cupsGetPrinters()
-            isInstalled = printers.contains(where: { $0.name == printerName })
-        } catch {
-            print("Error checking printer installation: \(error)")
-            isInstalled = false
+        cupsQueue.async {
+            var dest: UnsafeMutablePointer<cups_dest_t>?
+            let count = cupsGetDests(&dest)
+            defer { cupsFreeDests(count, dest) }
+            
+            let found = (0..<count).contains { i in
+                let printer = dest!.advanced(by: Int(i)).pointee
+                let name = String(cString: printer.name)
+                return name == self.printerName
+            }
+            
+            DispatchQueue.main.async {
+                self.isInstalled = found
+            }
         }
     }
     
@@ -47,22 +56,49 @@ class PrinterManager: ObservableObject {
                                     ofItemAtPath: "/usr/lib/cups/backend/cups-pdf")
         
         // Install printer via CUPS
-        let conn = try CUPSConnection()
-        try conn.addPrinter(
-            name: printerName,
-            uri: "cups-pdf:/",
-            ppdFile: "/System/Library/Frameworks/CUPS.framework/PPDs/Generic.ppd",
-            info: printerDescription,
-            location: "Local PDF Printer"
-        )
+        let request = ippNewRequest(IPP_OP_CUPS_ADD_MODIFY_PRINTER)
+        defer { ippDelete(request) }
+        
+        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI,
+                    "printer-uri", nil, "ipp://localhost/printers/\(printerName)")
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_NAME,
+                    "printer-name", nil, printerName)
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_URI,
+                    "device-uri", nil, "cups-pdf:/")
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT,
+                    "printer-info", nil, printerDescription)
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT,
+                    "printer-location", nil, "Local PDF Printer")
+        
+        let http = httpConnect2(cupsServer(), ippPort(), nil, AF_UNSPEC, cupsEncryption(), 1, 30000, nil)
+        defer { httpClose(http) }
+        
+        let response = cupsDoRequest(http, request, "/admin/")
+        guard response != nil else {
+            throw NSError(domain: "CUPSError", code: 2,
+                         userInfo: [NSLocalizedDescriptionKey: "Failed to add printer"])
+        }
+        ippDelete(response)
         
         isInstalled = true
     }
     
     func uninstallPrinter() throws {
-        // Remove printer from CUPS
-        let conn = try CUPSConnection()
-        try conn.deletePrinter(name: printerName)
+        let request = ippNewRequest(IPP_OP_CUPS_DELETE_PRINTER)
+        defer { ippDelete(request) }
+        
+        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI,
+                    "printer-uri", nil, "ipp://localhost/printers/\(printerName)")
+        
+        let http = httpConnect2(cupsServer(), ippPort(), nil, AF_UNSPEC, cupsEncryption(), 1, 30000, nil)
+        defer { httpClose(http) }
+        
+        let response = cupsDoRequest(http, request, "/admin/")
+        guard response != nil else {
+            throw NSError(domain: "CUPSError", code: 3,
+                         userInfo: [NSLocalizedDescriptionKey: "Failed to delete printer"])
+        }
+        ippDelete(response)
         
         // Clean up configuration and backend
         try? fileManager.removeItem(atPath: configFile)
@@ -100,7 +136,11 @@ class PrinterManager: ObservableObject {
         } else {
             // Show save dialog
             let savePanel = NSSavePanel()
-            savePanel.allowedContentTypes = [UTType.pdf]
+            if #available(macOS 11.0, *) {
+                savePanel.allowedContentTypes = [UTType.pdf]
+            } else {
+                savePanel.allowedFileTypes = ["pdf"]
+            }
             savePanel.nameFieldStringValue = filename
             
             savePanel.begin { response in
@@ -113,79 +153,5 @@ class PrinterManager: ObservableObject {
                 }
             }
         }
-    }
-}
-
-// CUPS Connection Helper
-struct CUPSConnection {
-    private var http: UnsafeMutablePointer<http_t>?
-    
-    init() throws {
-        http = httpConnect2(cupsServer(), ippPort(), nil, AF_UNSPEC,
-                          cupsEncryption(), 1, 30000, nil)
-        guard http != nil else {
-            throw NSError(domain: "CUPSError", code: 1, 
-                         userInfo: [NSLocalizedDescriptionKey: "Failed to connect to CUPS server"])
-        }
-    }
-    
-    func addPrinter(name: String, uri: String, ppdFile: String,
-                   info: String, location: String) throws {
-        var request = ippNewRequest(IPP_OP_CUPS_ADD_MODIFY_PRINTER)
-        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI,
-                    "printer-uri", nil, "ipp://localhost/printers/\(name)")
-        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_NAME,
-                    "printer-name", nil, name)
-        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_URI,
-                    "device-uri", nil, uri)
-        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT,
-                    "printer-info", nil, info)
-        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT,
-                    "printer-location", nil, location)
-        
-        var response = cupsDoRequest(http, request, "/admin/")
-        guard response != nil else {
-            throw NSError(domain: "CUPSError", code: 2,
-                         userInfo: [NSLocalizedDescriptionKey: "Failed to add printer"])
-        }
-        ippDelete(response)
-    }
-    
-    func deletePrinter(name: String) throws {
-        var request = ippNewRequest(IPP_OP_CUPS_DELETE_PRINTER)
-        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI,
-                    "printer-uri", nil, "ipp://localhost/printers/\(name)")
-        
-        var response = cupsDoRequest(http, request, "/admin/")
-        guard response != nil else {
-            throw NSError(domain: "CUPSError", code: 3,
-                         userInfo: [NSLocalizedDescriptionKey: "Failed to delete printer"])
-        }
-        ippDelete(response)
-    }
-    
-    func cupsGetPrinters() throws -> [(name: String, uri: String)] {
-        var request = ippNewRequest(IPP_OP_CUPS_GET_PRINTERS)
-        var response = cupsDoRequest(http, request, "/admin/")
-        guard response != nil else {
-            throw NSError(domain: "CUPSError", code: 4,
-                         userInfo: [NSLocalizedDescriptionKey: "Failed to get printers"])
-        }
-        defer { ippDelete(response) }
-        
-        var printers: [(name: String, uri: String)] = []
-        var attr: UnsafeMutablePointer<ipp_attribute_t>?
-        
-        while let printer = ippNextAttribute(response) {
-            if ippGetName(printer) == "printer-name" {
-                let name = String(cString: ippGetString(printer, 0, nil))
-                attr = ippFindAttribute(response, "device-uri", IPP_TAG_URI)
-                if let uri = attr.map({ String(cString: ippGetString($0, 0, nil)) }) {
-                    printers.append((name: name, uri: uri))
-                }
-            }
-        }
-        
-        return printers
     }
 }

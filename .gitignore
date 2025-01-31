@@ -1,0 +1,27 @@
+# Xcode
+.DS_Store
+xcuserdata/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+build/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Compiled files
+*.o
+*.dylib
+*.so
+
+# Logs
+*.log
+
+# Reference implementation (cloned separately)
+reference/

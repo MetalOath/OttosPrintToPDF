@@ -49,11 +49,11 @@ class PrinterManager: ObservableObject {
         
         // Copy CUPS backend from reference implementation
         try fileManager.copyItem(at: URL(fileURLWithPath: "reference/cups-pdf"), 
-                               to: URL(fileURLWithPath: "/usr/lib/cups/backend/cups-pdf"))
+                               to: URL(fileURLWithPath: "/usr/local/lib/cups/backend/cups-pdf"))
         
         // Set permissions
         try fileManager.setAttributes([.posixPermissions: 0o755], 
-                                    ofItemAtPath: "/usr/lib/cups/backend/cups-pdf")
+                                    ofItemAtPath: "/usr/local/lib/cups/backend/cups-pdf")
         
         // Install printer via CUPS
         let request = ippNewRequest(IPP_OP_CUPS_ADD_MODIFY_PRINTER)
@@ -102,7 +102,7 @@ class PrinterManager: ObservableObject {
         
         // Clean up configuration and backend
         try? fileManager.removeItem(atPath: configFile)
-        try? fileManager.removeItem(atPath: "/usr/lib/cups/backend/cups-pdf")
+        try? fileManager.removeItem(atPath: "/usr/local/lib/cups/backend/cups-pdf")
         
         isInstalled = false
     }

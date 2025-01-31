@@ -19,6 +19,7 @@ cd ..
 
 # 2. Create app bundle structure
 echo "Creating app bundle..."
+mkdir -p build
 BUNDLE_ROOT="build/$APP_NAME.app"
 CONTENTS="$BUNDLE_ROOT/Contents"
 MACOS="$CONTENTS/MacOS"
@@ -33,7 +34,20 @@ xcodebuild -scheme OttosPrintToPDF -configuration Release
 
 # 4. Copy files into bundle
 echo "Assembling application bundle..."
-cp -r "build/Release/OttosPrintToPDF.app/"* "$BUNDLE_ROOT/"
+BUILD_DIR=$(xcodebuild -scheme OttosPrintToPDF -configuration Release -showBuildSettings | grep -m 1 "BUILT_PRODUCTS_DIR" | awk -F '=' '{print $2}' | xargs)
+RELEASE_APP="$BUILD_DIR/OttosPrintToPDF.app"
+echo "Build directory: $BUILD_DIR"
+echo "Release app path: $RELEASE_APP"
+echo "Cleaning old builds..."
+rm -rf "build/$APP_NAME.app" "build/OttosPrintToPDF.app"
+echo "Copying new build..."
+if [ ! -d "$RELEASE_APP" ]; then
+    echo "Error: Built application not found at $RELEASE_APP"
+    echo "Contents of $BUILD_DIR:"
+    ls -la "$BUILD_DIR"
+    exit 1
+fi
+cp -Rv "$RELEASE_APP" "build/$APP_NAME.app"
 
 # 5. Copy CUPS backend and configuration
 echo "Installing CUPS components..."

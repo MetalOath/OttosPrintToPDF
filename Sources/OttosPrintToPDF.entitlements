@@ -12,7 +12,10 @@
     <array>
         <string>/private/etc/cups/</string>
         <string>/private/var/spool/cups/</string>
-        <string>/usr/lib/cups/backend/</string>
+        <string>/usr/local/lib/cups/backend/</string>
+        <string>/usr/local/share/cups/model/</string>
+        <string>/usr/local/bin/</string>
+        <string>/private/var/spool/cups-pdf/</string>
     </array>
     <key>com.apple.security.temporary-exception.apple-events</key>
     <array>

@@ -21,13 +21,29 @@ class PrinterManager: ObservableObject {
     private let cupsQueue = DispatchQueue(label: "com.otto.printopdf.cups")
     
     init() {
-        checkPrinterInstallation()
+        // Defer printer check to avoid crash if CUPS is not running
+        DispatchQueue.main.async {
+            self.checkPrinterInstallation()
+        }
     }
     
     private func checkPrinterInstallation() {
         cupsQueue.async {
+            // First check if CUPS is available
             var dest: UnsafeMutablePointer<cups_dest_t>?
             let count = cupsGetDests(&dest)
+            
+            if count == 0 {
+                // CUPS might not be running, set as not installed
+                DispatchQueue.main.async {
+                    self.isInstalled = false
+                }
+                if dest != nil {
+                    cupsFreeDests(count, dest)
+                }
+                return
+            }
+            
             defer { cupsFreeDests(count, dest) }
             
             let found = (0..<count).contains { i in
@@ -127,12 +143,6 @@ class PrinterManager: ObservableObject {
             }
         }
         
-        // Add the printer
-        guard let cPPDPath = ppdPath.cString(using: .utf8) else {
-            throw NSError(domain: "CUPSError", code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: "Invalid PPD path"])
-        }
-        
         // Add the printer using IPP
         // Connect to CUPS server
         var cancel: Int32 = 0
@@ -149,7 +159,7 @@ class PrinterManager: ObservableObject {
         ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_URI, "device-uri", nil, "cups-pdf:/")
         ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT, "printer-info", nil, printerDescription)
         ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT, "printer-location", nil, "Local PDF Printer")
-        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_NAME, "ppd-name", nil, cPPDPath)
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_NAME, "ppd-name", nil, ppdPath)
         
         let response = cupsDoRequest(http, request, "/admin/")
         guard response != nil else {

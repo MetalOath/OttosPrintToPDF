@@ -23,16 +23,8 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>12.0</string>
+	<real>12</real>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>NSSystemAdministrationUsageDescription</key>
-	<string>This app needs to install a virtual PDF printer to enable PDF creation from any application.</string>
-	<key>NSPrintersUsageDescription</key>
-	<string>This app creates a virtual printer to enable PDF creation.</string>
-	<key>NSFileProviderDomainUsageDescription</key>
-	<string>This app needs access to save PDF files in your chosen locations.</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>This app needs to interact with system printing services to manage the virtual PDF printer.</string>
 </dict>
 </plist>

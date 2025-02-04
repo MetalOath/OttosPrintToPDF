@@ -13,12 +13,18 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.otto.printopdf
-        DEVELOPMENT_TEAM: "Arnaout Inc." # User will need to set this
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
         CODE_SIGN_ENTITLEMENTS: Sources/OttosPrintToPDF.entitlements
         ENABLE_HARDENED_RUNTIME: YES
         MACOSX_DEPLOYMENT_TARGET: 12.0
         SWIFT_OBJC_BRIDGING_HEADER: Sources/OttosPrintToPDF-Bridging-Header.h
         OTHER_LDFLAGS: ["-lcups"]
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Sources
+        MODULEMAP_FILE: $(SRCROOT)/Sources/cups.modulemap
+        HEADER_SEARCH_PATHS: ["/usr/include", "/usr/include/cups"]
+        SYSTEM_HEADER_SEARCH_PATHS: ["/usr/include", "/usr/include/cups"]
+        LIBRARY_SEARCH_PATHS: ["/usr/lib"]
     info:
       path: Sources/Info.plist
       properties:

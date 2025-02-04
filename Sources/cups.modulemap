@@ -1,0 +1,8 @@
+module CUPS [system] {
+    header "/usr/include/cups/cups.h"
+    header "/usr/include/cups/ppd.h"
+    header "/usr/include/cups/http.h"
+    header "/usr/include/cups/ipp.h"
+    link "cups"
+    export *
+}

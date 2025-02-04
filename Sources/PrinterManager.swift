@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import UniformTypeIdentifiers
+import CUPS
 
 class PrinterManager: ObservableObject {
     static let shared = PrinterManager()
@@ -42,6 +43,25 @@ class PrinterManager: ObservableObject {
     }
     
     func installPrinter() throws {
+        // Check if CUPS is running
+        var dest: UnsafeMutablePointer<cups_dest_t>?
+        if cupsGetDests(&dest) == 0 {
+            cupsFreeDests(0, dest)
+            throw NSError(domain: "CUPSError", code: 9,
+                        userInfo: [NSLocalizedDescriptionKey: "CUPS service is not running"])
+        }
+        cupsFreeDests(0, dest)
+        
+        // Check if we have root privileges for file operations
+        let testPath = "/usr/local/lib/cups/test_permissions"
+        do {
+            try "test".write(to: URL(fileURLWithPath: testPath), atomically: true, encoding: .utf8)
+            try fileManager.removeItem(atPath: testPath)
+        } catch {
+            throw NSError(domain: "CUPSError", code: 10,
+                        userInfo: [NSLocalizedDescriptionKey: "Insufficient permissions. Please run with admin privileges"])
+        }
+        
         do {
             // Create required directories
             try fileManager.createDirectory(atPath: "/private/var/spool/cups-pdf", withIntermediateDirectories: true, attributes: [.posixPermissions: 0o777])
@@ -94,13 +114,12 @@ class PrinterManager: ObservableObject {
         var options: UnsafeMutablePointer<cups_option_t>? = nil
         
         // Add printer options
-        withUnsafeMutablePointer(to: &numOptions) { numPtr in
-            _ = cupsAddOption("device-uri", "cups-pdf:/", numPtr, &options)
-            _ = cupsAddOption("printer-is-accepting-jobs", "true", numPtr, &options)
-            _ = cupsAddOption("printer-state", "3", numPtr, &options)
-            _ = cupsAddOption("printer-location", "Local PDF Printer", numPtr, &options)
-            _ = cupsAddOption("printer-info", printerDescription, numPtr, &options)
-        }
+        // Add printer options
+        numOptions = cupsAddOption("device-uri", "cups-pdf:/", numOptions, &options)
+        numOptions = cupsAddOption("printer-is-accepting-jobs", "true", numOptions, &options)
+        numOptions = cupsAddOption("printer-state", "3", numOptions, &options)
+        numOptions = cupsAddOption("printer-location", "Local PDF Printer", numOptions, &options)
+        numOptions = cupsAddOption("printer-info", printerDescription, numOptions, &options)
         
         defer {
             if numOptions > 0 {
@@ -109,35 +128,77 @@ class PrinterManager: ObservableObject {
         }
         
         // Add the printer
-        let result = cupsPrinterAdd(printerName, ppdPath)
-        if result == 0 {
-            let error = String(cString: cupsLastErrorString())
+        guard let cPPDPath = ppdPath.cString(using: .utf8) else {
+            throw NSError(domain: "CUPSError", code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Invalid PPD path"])
+        }
+        
+        // Add the printer using IPP
+        // Connect to CUPS server
+        var cancel: Int32 = 0
+        guard let http = httpConnect2(cupsServer(), ippPort(), nil, AF_UNSPEC, cupsEncryption(), 1, 30000, &cancel) else {
             throw NSError(domain: "CUPSError", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Failed to connect to CUPS server"])
+        }
+        defer { httpClose(http) }
+        
+        // Create printer
+        let request = ippNewRequest(IPP_OP_CUPS_ADD_MODIFY_PRINTER)
+        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", nil, "ipp://localhost/printers/\(printerName)")
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_NAME, "printer-name", nil, printerName)
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_URI, "device-uri", nil, "cups-pdf:/")
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT, "printer-info", nil, printerDescription)
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT, "printer-location", nil, "Local PDF Printer")
+        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_NAME, "ppd-name", nil, cPPDPath)
+        
+        let response = cupsDoRequest(http, request, "/admin/")
+        guard response != nil else {
+            let error = String(cString: cupsLastErrorString())
+            throw NSError(domain: "CUPSError", code: 3,
                         userInfo: [NSLocalizedDescriptionKey: "Failed to add printer: \(error)"])
         }
-        
-        // Set printer options
-        let optResult = cupsSetOptions(numOptions, options, printerName)
-        if optResult == 0 {
-            let error = String(cString: cupsLastErrorString())
-            throw NSError(domain: "CUPSError", code: 4,
-                        userInfo: [NSLocalizedDescriptionKey: "Failed to set printer options: \(error)"])
-        }
+        ippDelete(response)
         
         // Set as default printer
-        _ = cupsSetDefaultPrinter(printerName)
+        let defaultRequest = ippNewRequest(IPP_OP_CUPS_SET_DEFAULT)
+        ippAddString(defaultRequest, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", nil, "ipp://localhost/printers/\(printerName)")
+        let defaultResponse = cupsDoRequest(http, defaultRequest, "/admin/")
+        if defaultResponse != nil {
+            ippDelete(defaultResponse)
+        }
         
         isInstalled = true
     }
     
     func uninstallPrinter() throws {
-        // Delete printer using CUPS API
-        let result = cupsPrinterDelete(printerName)
-        if result == 0 {
+        // Check if CUPS is running
+        var dest: UnsafeMutablePointer<cups_dest_t>?
+        if cupsGetDests(&dest) == 0 {
+            cupsFreeDests(0, dest)
+            throw NSError(domain: "CUPSError", code: 9,
+                        userInfo: [NSLocalizedDescriptionKey: "CUPS service is not running"])
+        }
+        cupsFreeDests(0, dest)
+        
+        // Connect to CUPS server
+        var cancel: Int32 = 0
+        guard let http = httpConnect2(cupsServer(), ippPort(), nil, AF_UNSPEC, cupsEncryption(), 1, 30000, &cancel) else {
+            throw NSError(domain: "CUPSError", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Failed to connect to CUPS server"])
+        }
+        defer { httpClose(http) }
+        
+        // Delete the printer
+        let request = ippNewRequest(IPP_OP_CUPS_DELETE_PRINTER)
+        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", nil, "ipp://localhost/printers/\(printerName)")
+        
+        let response = cupsDoRequest(http, request, "/admin/")
+        if response == nil {
             let error = String(cString: cupsLastErrorString())
             throw NSError(domain: "CUPSError", code: 3,
                         userInfo: [NSLocalizedDescriptionKey: "Failed to delete printer: \(error)"])
         }
+        ippDelete(response)
         
         // Clean up configuration and backend (we have entitlements for this)
         // Clean up all installed components

@@ -9,13 +9,8 @@ class PrinterManager: ObservableObject {
     @Published var isAutoSaveEnabled = false
     @Published var isInstalled = false
     
-    private let printerName = "OttosPDF"
-    private let printerDescription = "Otto's Print to PDF"
-    private let spoolDirectory = "/private/var/spool/cups-pdf/"
-    private let configFile = "/private/etc/cups/cups-pdf.conf"
-    private let backendPath = "/usr/local/lib/cups/backend/cups-pdf"
-    private let ppdPath = "/usr/local/share/cups/model/CUPS-PDF_opt.ppd"
-    private let postProcPath = "/usr/local/bin/pdfpostproc.sh"
+    private let printerName = "Otto's Print to PDF"
+    private let spoolDirectory = "/var/spool/cups-pdf/"
     
     private var fileManager = FileManager.default
     private let cupsQueue = DispatchQueue(label: "com.otto.printopdf.cups")
@@ -68,116 +63,63 @@ class PrinterManager: ObservableObject {
         }
         cupsFreeDests(0, dest)
         
-        // Check if we have root privileges for file operations
-        let testPath = "/usr/local/lib/cups/test_permissions"
-        do {
-            try "test".write(to: URL(fileURLWithPath: testPath), atomically: true, encoding: .utf8)
-            try fileManager.removeItem(atPath: testPath)
-        } catch {
-            throw NSError(domain: "CUPSError", code: 10,
-                        userInfo: [NSLocalizedDescriptionKey: "Insufficient permissions. Please run with admin privileges"])
+        // Get the path to the installation script
+        guard let bundlePath = Bundle.main.resourcePath else {
+            throw NSError(domain: "CUPSError", code: 11,
+                        userInfo: [NSLocalizedDescriptionKey: "Could not locate installation script"])
         }
         
-        do {
-            // Create required directories
-            try fileManager.createDirectory(atPath: "/private/var/spool/cups-pdf", withIntermediateDirectories: true, attributes: [.posixPermissions: 0o777])
-            try fileManager.createDirectory(atPath: "/usr/local/share/cups/model", withIntermediateDirectories: true, attributes: nil)
-            try fileManager.createDirectory(atPath: "/usr/local/lib/cups/backend", withIntermediateDirectories: true, attributes: nil)
-            
-            // Create CUPS-PDF configuration
-            let configContent = """
-            Out ${HOME}/Documents/PDFs
-            Label 1
-            PostProcessing \(postProcPath)
-            """
-            
-            try configContent.write(to: URL(fileURLWithPath: configFile), atomically: true, encoding: .utf8)
-            try fileManager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: configFile)
-            
-            // Copy CUPS backend
-            if let backendData = try? Data(contentsOf: URL(fileURLWithPath: "reference/cups-pdf")) {
-                try backendData.write(to: URL(fileURLWithPath: backendPath))
-                try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: backendPath)
-            } else {
-                throw NSError(domain: "CUPSError", code: 5,
-                            userInfo: [NSLocalizedDescriptionKey: "Failed to install backend"])
-            }
-            
-            // Copy PPD file
-            if let ppdData = try? Data(contentsOf: URL(fileURLWithPath: "reference/CUPS-PDF_opt.ppd")) {
-                try ppdData.write(to: URL(fileURLWithPath: ppdPath))
-                try fileManager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: ppdPath)
-            } else {
-                throw NSError(domain: "CUPSError", code: 6,
-                            userInfo: [NSLocalizedDescriptionKey: "Failed to install PPD file"])
-            }
-            
-            // Copy post-processing script
-            if let scriptData = try? Data(contentsOf: URL(fileURLWithPath: "Sources/pdfpostproc.sh")) {
-                try scriptData.write(to: URL(fileURLWithPath: postProcPath))
-                try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: postProcPath)
-            } else {
-                throw NSError(domain: "CUPSError", code: 7,
-                            userInfo: [NSLocalizedDescriptionKey: "Failed to install post-processing script"])
-            }
-        } catch {
-            throw NSError(domain: "CUPSError", code: 8,
-                         userInfo: [NSLocalizedDescriptionKey: "Failed to set up printer files: \(error.localizedDescription)"])
-        }
+        let scriptName = "install-printer.sh"
+        let resourcePath = (bundlePath as NSString).appendingPathComponent(scriptName)
         
-        // Install printer using CUPS API
-        var numOptions: Int32 = 0
-        var options: UnsafeMutablePointer<cups_option_t>? = nil
-        
-        // Add printer options
-        // Add printer options
-        numOptions = cupsAddOption("device-uri", "cups-pdf:/", numOptions, &options)
-        numOptions = cupsAddOption("printer-is-accepting-jobs", "true", numOptions, &options)
-        numOptions = cupsAddOption("printer-state", "3", numOptions, &options)
-        numOptions = cupsAddOption("printer-location", "Local PDF Printer", numOptions, &options)
-        numOptions = cupsAddOption("printer-info", printerDescription, numOptions, &options)
+        // Create a temporary directory
+        let tempDir = try fileManager.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: URL(fileURLWithPath: bundlePath), create: true)
+        let tempScriptPath = (tempDir.path as NSString).appendingPathComponent(scriptName)
         
         defer {
-            if numOptions > 0 {
-                cupsFreeOptions(numOptions, options)
+            // Clean up temporary directory
+            try? fileManager.removeItem(at: tempDir)
+        }
+        
+        // Copy the script to temp directory
+        try fileManager.copyItem(atPath: resourcePath, toPath: tempScriptPath)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempScriptPath)
+        
+        // Pass the bundle path to the script so it can find the CUPS backend and PPD
+        let command = "\(tempScriptPath) \"\(bundlePath)\""
+        
+        // Create and configure the process
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = [
+            "-e",
+            """
+            do shell script "\(command)" with administrator privileges
+            """
+        ]
+        
+        // Capture output and errors
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        task.standardOutput = outputPipe
+        task.standardError = errorPipe
+        
+        do {
+            try task.run()
+            task.waitUntilExit()
+            
+            if task.terminationStatus != 0 {
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+                throw NSError(domain: "CUPSError", code: 12,
+                            userInfo: [NSLocalizedDescriptionKey: "Installation failed: \(errorOutput)"])
             }
+            
+            isInstalled = true
+        } catch {
+            throw NSError(domain: "CUPSError", code: 13,
+                        userInfo: [NSLocalizedDescriptionKey: "Failed to run installation script: \(error.localizedDescription)"])
         }
-        
-        // Add the printer using IPP
-        // Connect to CUPS server
-        var cancel: Int32 = 0
-        guard let http = httpConnect2(cupsServer(), ippPort(), nil, AF_UNSPEC, cupsEncryption(), 1, 30000, &cancel) else {
-            throw NSError(domain: "CUPSError", code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "Failed to connect to CUPS server"])
-        }
-        defer { httpClose(http) }
-        
-        // Create printer
-        let request = ippNewRequest(IPP_OP_CUPS_ADD_MODIFY_PRINTER)
-        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", nil, "ipp://localhost/printers/\(printerName)")
-        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_NAME, "printer-name", nil, printerName)
-        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_URI, "device-uri", nil, "cups-pdf:/")
-        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT, "printer-info", nil, printerDescription)
-        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_TEXT, "printer-location", nil, "Local PDF Printer")
-        ippAddString(request, IPP_TAG_PRINTER, IPP_TAG_NAME, "ppd-name", nil, ppdPath)
-        
-        let response = cupsDoRequest(http, request, "/admin/")
-        guard response != nil else {
-            let error = String(cString: cupsLastErrorString())
-            throw NSError(domain: "CUPSError", code: 3,
-                        userInfo: [NSLocalizedDescriptionKey: "Failed to add printer: \(error)"])
-        }
-        ippDelete(response)
-        
-        // Set as default printer
-        let defaultRequest = ippNewRequest(IPP_OP_CUPS_SET_DEFAULT)
-        ippAddString(defaultRequest, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", nil, "ipp://localhost/printers/\(printerName)")
-        let defaultResponse = cupsDoRequest(http, defaultRequest, "/admin/")
-        if defaultResponse != nil {
-            ippDelete(defaultResponse)
-        }
-        
-        isInstalled = true
     }
     
     func uninstallPrinter() throws {
@@ -190,34 +132,63 @@ class PrinterManager: ObservableObject {
         }
         cupsFreeDests(0, dest)
         
-        // Connect to CUPS server
-        var cancel: Int32 = 0
-        guard let http = httpConnect2(cupsServer(), ippPort(), nil, AF_UNSPEC, cupsEncryption(), 1, 30000, &cancel) else {
-            throw NSError(domain: "CUPSError", code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "Failed to connect to CUPS server"])
+        // Get the path to the uninstallation script
+        guard let bundlePath = Bundle.main.resourcePath else {
+            throw NSError(domain: "CUPSError", code: 11,
+                        userInfo: [NSLocalizedDescriptionKey: "Could not locate uninstallation script"])
         }
-        defer { httpClose(http) }
         
-        // Delete the printer
-        let request = ippNewRequest(IPP_OP_CUPS_DELETE_PRINTER)
-        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", nil, "ipp://localhost/printers/\(printerName)")
+        let scriptName = "uninstall-printer.sh"
+        let resourcePath = (bundlePath as NSString).appendingPathComponent(scriptName)
         
-        let response = cupsDoRequest(http, request, "/admin/")
-        if response == nil {
-            let error = String(cString: cupsLastErrorString())
-            throw NSError(domain: "CUPSError", code: 3,
-                        userInfo: [NSLocalizedDescriptionKey: "Failed to delete printer: \(error)"])
+        // Create a temporary directory
+        let tempDir = try fileManager.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: URL(fileURLWithPath: bundlePath), create: true)
+        let tempScriptPath = (tempDir.path as NSString).appendingPathComponent(scriptName)
+        
+        defer {
+            // Clean up temporary directory
+            try? fileManager.removeItem(at: tempDir)
         }
-        ippDelete(response)
         
-        // Clean up configuration and backend (we have entitlements for this)
-        // Clean up all installed components
-        try? fileManager.removeItem(atPath: configFile)
-        try? fileManager.removeItem(atPath: backendPath)
-        try? fileManager.removeItem(atPath: ppdPath)
-        try? fileManager.removeItem(atPath: postProcPath)
+        // Copy the script to temp directory
+        try fileManager.copyItem(atPath: resourcePath, toPath: tempScriptPath)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempScriptPath)
         
-        isInstalled = false
+        // Pass the bundle path to the script
+        let command = "\(tempScriptPath) \"\(bundlePath)\""
+        
+        // Create and configure the process
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = [
+            "-e",
+            """
+            do shell script "\(command)" with administrator privileges
+            """
+        ]
+        
+        // Capture output and errors
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        task.standardOutput = outputPipe
+        task.standardError = errorPipe
+        
+        do {
+            try task.run()
+            task.waitUntilExit()
+            
+            if task.terminationStatus != 0 {
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+                throw NSError(domain: "CUPSError", code: 12,
+                            userInfo: [NSLocalizedDescriptionKey: "Uninstallation failed: \(errorOutput)"])
+            }
+            
+            isInstalled = false
+        } catch {
+            throw NSError(domain: "CUPSError", code: 13,
+                        userInfo: [NSLocalizedDescriptionKey: "Failed to run uninstallation script: \(error.localizedDescription)"])
+        }
     }
     
     func handleNewPDF(at spoolPath: String) {

@@ -10,6 +10,11 @@ targets:
     platform: macOS
     sources: 
       - Sources
+    resources:
+      - path: Sources/install-printer.sh
+      - path: Sources/uninstall-printer.sh
+      - path: Sources/cups-pdf
+      - path: Sources/CUPS-PDF.ppd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.otto.printopdf

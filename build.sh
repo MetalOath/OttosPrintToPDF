@@ -13,9 +13,7 @@ echo "Building Otto's Print to PDF..."
 
 # 1. Build CUPS backend
 echo "Building CUPS backend..."
-cd reference
-gcc -O9 -s -o cups-pdf cups-pdf.c -lcups
-cd ..
+gcc -O9 -s -o Sources/cups-pdf Sources/cups-pdf.c -lcups
 
 # 2. Create app bundle structure
 echo "Creating app bundle..."
@@ -49,15 +47,24 @@ if [ ! -d "$RELEASE_APP" ]; then
 fi
 cp -Rv "$RELEASE_APP" "build/$APP_NAME.app"
 
+# Copy additional resources
+echo "Copying additional resources..."
+cp -v "Sources/install-printer.sh" "build/$APP_NAME.app/Contents/Resources/"
+cp -v "Sources/uninstall-printer.sh" "build/$APP_NAME.app/Contents/Resources/"
+cp -v "Sources/CUPS-PDF.ppd" "build/$APP_NAME.app/Contents/Resources/"
+cp -v "Sources/cups-pdf" "build/$APP_NAME.app/Contents/Resources/"
+chmod 755 "build/$APP_NAME.app/Contents/Resources/install-printer.sh"
+chmod 755 "build/$APP_NAME.app/Contents/Resources/uninstall-printer.sh"
+
 # 5. Copy CUPS backend and configuration
 echo "Installing CUPS components..."
 sudo mkdir -p "/usr/local/lib/cups/backend"
-sudo cp "reference/cups-pdf" "/usr/local/lib/cups/backend/"
+sudo cp "Sources/cups-pdf" "/usr/local/lib/cups/backend/"
 sudo chmod 755 "/usr/local/lib/cups/backend/cups-pdf"
 
 # Copy PPD file
 sudo mkdir -p "/usr/local/share/cups/model"
-sudo cp "reference/CUPS-PDF_opt.ppd" "/usr/local/share/cups/model/"
+sudo cp "Sources/CUPS-PDF.ppd" "/usr/local/share/cups/model/"
 
 # 6. Install post-processing script
 echo "Installing post-processing script..."

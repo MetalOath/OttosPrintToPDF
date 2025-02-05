@@ -54,20 +54,29 @@ class PrinterManager: ObservableObject {
     }
     
     func installPrinter() throws {
+        print("Starting printer installation...")
+        
         // Check if CUPS is running
         var dest: UnsafeMutablePointer<cups_dest_t>?
-        if cupsGetDests(&dest) == 0 {
-            cupsFreeDests(0, dest)
+        let destCount = cupsGetDests(&dest)
+        defer { if dest != nil { cupsFreeDests(destCount, dest) } }
+        
+        if destCount == 0 {
+            print("CUPS service not running")
             throw NSError(domain: "CUPSError", code: 9,
                         userInfo: [NSLocalizedDescriptionKey: "CUPS service is not running"])
         }
-        cupsFreeDests(0, dest)
+        
+        print("CUPS service is running")
         
         // Get the path to the installation script
         guard let bundlePath = Bundle.main.resourcePath else {
+            print("Failed to get bundle resource path")
             throw NSError(domain: "CUPSError", code: 11,
                         userInfo: [NSLocalizedDescriptionKey: "Could not locate installation script"])
         }
+        
+        print("Bundle resource path: \(bundlePath)")
         
         let scriptName = "install-printer.sh"
         let resourcePath = (bundlePath as NSString).appendingPathComponent(scriptName)
@@ -86,17 +95,25 @@ class PrinterManager: ObservableObject {
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempScriptPath)
         
         // Pass the bundle path to the script so it can find the CUPS backend and PPD
-        let command = "\(tempScriptPath) \"\(bundlePath)\""
-        
         // Create and configure the process
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        task.arguments = [
-            "-e",
-            """
-            do shell script "\(command)" with administrator privileges
-            """
-        ]
+        
+        // Properly quote paths for shell command
+        let quotedTempPath = tempScriptPath.replacingOccurrences(of: "\"", with: "\\\"")
+        let quotedBundlePath = bundlePath.replacingOccurrences(of: "\"", with: "\\\"")
+        
+        print("Using temp script path: \(quotedTempPath)")
+        print("Using bundle path: \(quotedBundlePath)")
+        
+        // Use AppleScript with explicit sudo command and proper path escaping
+        let scriptCommand = """
+        tell application "System Events"
+            activate
+            do shell script "sudo " & (quoted form of "\(tempScriptPath)") & " " & (quoted form of "\(bundlePath)") with administrator privileges
+        end tell
+        """
+        task.arguments = ["-e", scriptCommand]
         
         // Capture output and errors
         let outputPipe = Pipe()
@@ -108,12 +125,32 @@ class PrinterManager: ObservableObject {
             try task.run()
             task.waitUntilExit()
             
-            if task.terminationStatus != 0 {
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-                throw NSError(domain: "CUPSError", code: 12,
-                            userInfo: [NSLocalizedDescriptionKey: "Installation failed: \(errorOutput)"])
+            let status = task.terminationStatus
+            
+            // Capture both standard output and error output
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            
+            let output = String(data: outputData, encoding: .utf8) ?? ""
+            let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
+            
+            print("Installation script output: \(output)")
+            if !errorOutput.isEmpty {
+                print("Installation script error output: \(errorOutput)")
             }
+            print("Installation script completed with status: \(status)")
+            
+            if status != 0 {
+                // Log both error and output for better debugging
+                print("Error output: \(errorOutput)")
+                print("Standard output: \(output)")
+                throw NSError(domain: "CUPSError", code: 12,
+                            userInfo: [NSLocalizedDescriptionKey: "Installation failed. Please check your administrator password and try again."])
+            }
+            
+            // Verify the installation
+            print("Verifying printer installation...")
+            checkPrinterInstallation()
             
             isInstalled = true
         } catch {
@@ -154,18 +191,18 @@ class PrinterManager: ObservableObject {
         try fileManager.copyItem(atPath: resourcePath, toPath: tempScriptPath)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempScriptPath)
         
-        // Pass the bundle path to the script
-        let command = "\(tempScriptPath) \"\(bundlePath)\""
-        
         // Create and configure the process
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        task.arguments = [
-            "-e",
-            """
-            do shell script "\(command)" with administrator privileges
-            """
-        ]
+        
+        // Use AppleScript with explicit sudo command and proper path escaping
+        let scriptCommand = """
+        tell application "System Events"
+            activate
+            do shell script "sudo " & (quoted form of "\(tempScriptPath)") & " " & (quoted form of "\(bundlePath)") with administrator privileges
+        end tell
+        """
+        task.arguments = ["-e", scriptCommand]
         
         // Capture output and errors
         let outputPipe = Pipe()
@@ -177,11 +214,18 @@ class PrinterManager: ObservableObject {
             try task.run()
             task.waitUntilExit()
             
-            if task.terminationStatus != 0 {
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+            let status = task.terminationStatus
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+            let output = String(data: outputData, encoding: .utf8) ?? ""
+            
+            if status != 0 {
+                // Log both error and output for better debugging
+                print("Error output: \(errorOutput)")
+                print("Standard output: \(output)")
                 throw NSError(domain: "CUPSError", code: 12,
-                            userInfo: [NSLocalizedDescriptionKey: "Uninstallation failed: \(errorOutput)"])
+                            userInfo: [NSLocalizedDescriptionKey: "Uninstallation failed. Please check your administrator password and try again."])
             }
             
             isInstalled = false

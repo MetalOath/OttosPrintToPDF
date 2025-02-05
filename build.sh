@@ -47,14 +47,23 @@ if [ ! -d "$RELEASE_APP" ]; then
 fi
 cp -Rv "$RELEASE_APP" "build/$APP_NAME.app"
 
-# Copy additional resources
-echo "Copying additional resources..."
-cp -v "Sources/install-printer.sh" "build/$APP_NAME.app/Contents/Resources/"
-cp -v "Sources/uninstall-printer.sh" "build/$APP_NAME.app/Contents/Resources/"
-cp -v "Sources/CUPS-PDF.ppd" "build/$APP_NAME.app/Contents/Resources/"
-cp -v "Sources/cups-pdf" "build/$APP_NAME.app/Contents/Resources/"
-chmod 755 "build/$APP_NAME.app/Contents/Resources/install-printer.sh"
-chmod 755 "build/$APP_NAME.app/Contents/Resources/uninstall-printer.sh"
+# Set permissions and copy resources
+echo "Setting up resources..."
+chmod 755 "Sources/install-printer.sh" "Sources/uninstall-printer.sh" "Sources/cups-pdf"
+chmod 644 "Sources/CUPS-PDF.ppd"
+
+echo "Copying resources..."
+mkdir -p "build/$APP_NAME.app/Contents/Resources"
+cp -p "Sources/install-printer.sh" "build/$APP_NAME.app/Contents/Resources/"
+cp -p "Sources/uninstall-printer.sh" "build/$APP_NAME.app/Contents/Resources/"
+cp -p "Sources/CUPS-PDF.ppd" "build/$APP_NAME.app/Contents/Resources/"
+cp -p "Sources/cups-pdf" "build/$APP_NAME.app/Contents/Resources/"
+
+# Verify permissions after copy
+echo "Verifying resource permissions..."
+test -x "build/$APP_NAME.app/Contents/Resources/install-printer.sh" || exit 1
+test -x "build/$APP_NAME.app/Contents/Resources/uninstall-printer.sh" || exit 1
+test -x "build/$APP_NAME.app/Contents/Resources/cups-pdf" || exit 1
 
 # 5. Copy CUPS backend and configuration
 echo "Installing CUPS components..."

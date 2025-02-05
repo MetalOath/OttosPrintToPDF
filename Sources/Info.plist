@@ -26,5 +26,11 @@
 	<string>12.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>This app needs to control System Events to request administrator privileges for printer installation.</string>
+	<key>NSSystemAdministrationUsageDescription</key>
+	<string>Administrator privileges are required to install the virtual PDF printer.</string>
+	<key>NSAppleScriptEnabled</key>
+	<true/>
 </dict>
 </plist>

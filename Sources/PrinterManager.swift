@@ -2,8 +2,12 @@ import Foundation
 import AppKit
 import UniformTypeIdentifiers
 import CUPS
+import Logger
 
 class PrinterManager: ObservableObject {
+    // Initialize logger for debugging
+    private let log = Logger.shared
+    
     static let shared = PrinterManager()
     
     @Published var isAutoSaveEnabled = false
@@ -54,7 +58,20 @@ class PrinterManager: ObservableObject {
     }
     
     func installPrinter() throws {
-        print("Starting printer installation...")
+        log.log("Starting printer installation process", level: Logger.Level.info)
+        
+        // Check accessibility permissions
+        let trusted = AXIsProcessTrusted()
+        if !trusted {
+            throw NSError(domain: "CUPSError", code: 15,
+                         userInfo: [NSLocalizedDescriptionKey: "Accessibility permissions required. Please follow these steps:\n1. Open System Settings\n2. Go to Privacy & Security > Accessibility\n3. Find \"Otto's Print to PDF\" in the list\n4. Enable the toggle next to it\n5. Try installing the printer again"])
+        }
+        
+        // Check if already installed
+        guard !isInstalled else {
+            log.log("Printer is already installed", level: Logger.Level.info)
+            return
+        }
         
         // Check if CUPS is running
         var dest: UnsafeMutablePointer<cups_dest_t>?
@@ -62,177 +79,272 @@ class PrinterManager: ObservableObject {
         defer { if dest != nil { cupsFreeDests(destCount, dest) } }
         
         if destCount == 0 {
-            print("CUPS service not running")
+            log.log("CUPS service not running", level: Logger.Level.error)
             throw NSError(domain: "CUPSError", code: 9,
                         userInfo: [NSLocalizedDescriptionKey: "CUPS service is not running"])
         }
         
-        print("CUPS service is running")
+        log.log("CUPS service is running", level: Logger.Level.info)
         
         // Get the path to the installation script
         guard let bundlePath = Bundle.main.resourcePath else {
-            print("Failed to get bundle resource path")
+            log.log("Failed to get bundle resource path", level: Logger.Level.error)
             throw NSError(domain: "CUPSError", code: 11,
                         userInfo: [NSLocalizedDescriptionKey: "Could not locate installation script"])
         }
         
-        print("Bundle resource path: \(bundlePath)")
+        log.log("Bundle resource path: \(bundlePath)", level: Logger.Level.debug)
         
         let scriptName = "install-printer.sh"
-        let resourcePath = (bundlePath as NSString).appendingPathComponent(scriptName)
+        let scriptPath = (bundlePath as NSString).appendingPathComponent(scriptName)
         
-        // Create a temporary directory
-        let tempDir = try fileManager.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: URL(fileURLWithPath: bundlePath), create: true)
-        let tempScriptPath = (tempDir.path as NSString).appendingPathComponent(scriptName)
+        // Verify all required files exist and are executable
+        let requiredFiles = [
+            (name: "Installation script", path: scriptPath, shouldBeExecutable: true),
+            (name: "CUPS backend", path: (bundlePath as NSString).appendingPathComponent("cups-pdf"), shouldBeExecutable: true),
+            (name: "PPD file", path: (bundlePath as NSString).appendingPathComponent("CUPS-PDF.ppd"), shouldBeExecutable: false)
+        ]
         
-        defer {
-            // Clean up temporary directory
-            try? fileManager.removeItem(at: tempDir)
+        for file in requiredFiles {
+            guard fileManager.fileExists(atPath: file.path) else {
+                log.log("\(file.name) not found at path: \(file.path)", level: Logger.Level.error)
+                throw NSError(domain: "CUPSError", code: 11,
+                            userInfo: [NSLocalizedDescriptionKey: "\(file.name) not found"])
+            }
+            
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: file.path, isDirectory: &isDirectory),
+                  !isDirectory.boolValue else {
+                log.log("\(file.name) is a directory at path: \(file.path)", level: Logger.Level.error)
+                throw NSError(domain: "CUPSError", code: 11,
+                            userInfo: [NSLocalizedDescriptionKey: "\(file.name) is not properly configured"])
+            }
+            
+            if file.shouldBeExecutable {
+                guard fileManager.isExecutableFile(atPath: file.path) else {
+                    log.log("\(file.name) is not executable at path: \(file.path)", level: Logger.Level.error)
+                    throw NSError(domain: "CUPSError", code: 11,
+                                userInfo: [NSLocalizedDescriptionKey: "\(file.name) is not properly configured"])
+                }
+            }
         }
         
-        // Copy the script to temp directory
-        try fileManager.copyItem(atPath: resourcePath, toPath: tempScriptPath)
-        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempScriptPath)
+        log.log("Starting installation with NSAppleScript...", level: Logger.Level.info)
         
-        // Pass the bundle path to the script so it can find the CUPS backend and PPD
-        // Create and configure the process
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        
-        // Properly quote paths for shell command
-        let quotedTempPath = tempScriptPath.replacingOccurrences(of: "\"", with: "\\\"")
-        let quotedBundlePath = bundlePath.replacingOccurrences(of: "\"", with: "\\\"")
-        
-        print("Using temp script path: \(quotedTempPath)")
-        print("Using bundle path: \(quotedBundlePath)")
-        
-        // Use AppleScript with explicit sudo command and proper path escaping
-        let scriptCommand = """
-        tell application "System Events"
-            activate
-            do shell script "sudo " & (quoted form of "\(tempScriptPath)") & " " & (quoted form of "\(bundlePath)") with administrator privileges
-        end tell
+        // Improved AppleScript with better error handling and timing
+        let scriptSource = """
+        on run
+            try
+                tell application "System Events"
+                    activate
+                    delay 2.0
+                end tell
+                
+                set scriptPath to "\(scriptPath.replacingOccurrences(of: "\"", with: "\\\""))"
+                set resourcePath to "\(bundlePath.replacingOccurrences(of: "\"", with: "\\\""))"
+                
+                set command to quoted form of scriptPath & " " & quoted form of resourcePath
+                
+                log "Executing command: " & command
+                
+                try
+                    set output to do shell script command with administrator privileges
+                on error errMsg
+                    error "Failed to obtain administrator privileges: " & errMsg
+                end try
+                
+                if output contains "ERROR:" then
+                    error output
+                end if
+                
+                return output
+            on error errMsg
+                if errMsg contains "User canceled" then
+                    error "Installation cancelled by user"
+                else if errMsg contains "not allowed to send keystrokes" then
+                    error "Failed to authenticate: System Events not authorized"
+                else
+                    error errMsg
+                end if
+            end try
+        end run
         """
-        task.arguments = ["-e", scriptCommand]
         
-        // Capture output and errors
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        task.standardOutput = outputPipe
-        task.standardError = errorPipe
+        log.log("AppleScript source prepared", level: Logger.Level.debug)
+        log.log("AppleScript source:\n\(scriptSource)", level: Logger.Level.debug)
         
-        do {
-            try task.run()
-            task.waitUntilExit()
-            
-            let status = task.terminationStatus
-            
-            // Capture both standard output and error output
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            
-            let output = String(data: outputData, encoding: .utf8) ?? ""
-            let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
-            
-            print("Installation script output: \(output)")
-            if !errorOutput.isEmpty {
-                print("Installation script error output: \(errorOutput)")
-            }
-            print("Installation script completed with status: \(status)")
-            
-            if status != 0 {
-                // Log both error and output for better debugging
-                print("Error output: \(errorOutput)")
-                print("Standard output: \(output)")
-                throw NSError(domain: "CUPSError", code: 12,
-                            userInfo: [NSLocalizedDescriptionKey: "Installation failed. Please check your administrator password and try again."])
-            }
-            
-            // Verify the installation
-            print("Verifying printer installation...")
-            checkPrinterInstallation()
-            
-            isInstalled = true
-        } catch {
+        var error: NSDictionary?
+        guard let script = NSAppleScript(source: scriptSource) else {
             throw NSError(domain: "CUPSError", code: 13,
-                        userInfo: [NSLocalizedDescriptionKey: "Failed to run installation script: \(error.localizedDescription)"])
+                        userInfo: [NSLocalizedDescriptionKey: "Failed to create AppleScript"])
         }
+        
+        log.log("Executing AppleScript...", level: Logger.Level.info)
+        let result = script.executeAndReturnError(&error)
+        
+        if let error = error {
+            log.log("AppleScript error: \(error)", level: Logger.Level.error)
+            let errorMessage = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
+            if errorMessage.contains("cancelled") || errorMessage.contains("canceled") {
+                throw NSError(domain: "CUPSError", code: 14,
+                            userInfo: [NSLocalizedDescriptionKey: "Installation cancelled by user"])
+            } else if errorMessage.contains("not authorized") {
+                throw NSError(domain: "CUPSError", code: 15,
+                            userInfo: [NSLocalizedDescriptionKey: "System Events not authorized. Please follow these steps:\n1. Open System Settings\n2. Go to Privacy & Security > Accessibility\n3. Find \"Otto's Print to PDF\" in the list\n4. Enable the toggle next to it\n5. Try installing the printer again"])
+            } else {
+                throw NSError(domain: "CUPSError", code: 12,
+                            userInfo: [NSLocalizedDescriptionKey: "Installation failed: \(errorMessage)"])
+            }
+        }
+        
+        if let output = result.stringValue {
+            log.log("Installation output: \(output)", level: Logger.Level.info)
+            
+            if output.contains("ERROR:") {
+                throw NSError(domain: "CUPSError", code: 16,
+                            userInfo: [NSLocalizedDescriptionKey: "Installation failed: \(output)"])
+            }
+        }
+        
+        // Verify the installation
+        log.log("Verifying printer installation...", level: Logger.Level.info)
+        checkPrinterInstallation()
+        
+        // Double check the installation status
+        var verifyDest: UnsafeMutablePointer<cups_dest_t>?
+        let verifyCount = cupsGetDests(&verifyDest)
+        defer { if verifyDest != nil { cupsFreeDests(verifyCount, verifyDest) } }
+        
+        let printerFound = (0..<verifyCount).contains { i in
+            let printer = verifyDest!.advanced(by: Int(i)).pointee
+            let name = String(cString: printer.name)
+            return name == self.printerName
+        }
+        
+        if !printerFound {
+            throw NSError(domain: "CUPSError", code: 17,
+                        userInfo: [NSLocalizedDescriptionKey: "Printer installation verification failed"])
+        }
+        
+        isInstalled = true
+        log.log("Printer installation completed successfully", level: Logger.Level.info)
     }
     
     func uninstallPrinter() throws {
+        log.log("Starting printer uninstallation...", level: Logger.Level.info)
+        
         // Check if CUPS is running
         var dest: UnsafeMutablePointer<cups_dest_t>?
-        if cupsGetDests(&dest) == 0 {
-            cupsFreeDests(0, dest)
+        let destCount = cupsGetDests(&dest)
+        defer { if dest != nil { cupsFreeDests(destCount, dest) } }
+        
+        if destCount == 0 {
+            log.log("CUPS service not running", level: Logger.Level.error)
             throw NSError(domain: "CUPSError", code: 9,
                         userInfo: [NSLocalizedDescriptionKey: "CUPS service is not running"])
         }
-        cupsFreeDests(0, dest)
         
         // Get the path to the uninstallation script
         guard let bundlePath = Bundle.main.resourcePath else {
+            log.log("Failed to get bundle resource path", level: Logger.Level.error)
             throw NSError(domain: "CUPSError", code: 11,
                         userInfo: [NSLocalizedDescriptionKey: "Could not locate uninstallation script"])
         }
         
         let scriptName = "uninstall-printer.sh"
-        let resourcePath = (bundlePath as NSString).appendingPathComponent(scriptName)
+        let scriptPath = (bundlePath as NSString).appendingPathComponent(scriptName)
         
-        // Create a temporary directory
-        let tempDir = try fileManager.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: URL(fileURLWithPath: bundlePath), create: true)
-        let tempScriptPath = (tempDir.path as NSString).appendingPathComponent(scriptName)
-        
-        defer {
-            // Clean up temporary directory
-            try? fileManager.removeItem(at: tempDir)
+        // Verify script exists and is executable
+        guard fileManager.fileExists(atPath: scriptPath) else {
+            log.log("Uninstallation script not found at path: \(scriptPath)", level: Logger.Level.error)
+            throw NSError(domain: "CUPSError", code: 11,
+                        userInfo: [NSLocalizedDescriptionKey: "Uninstallation script not found"])
         }
         
-        // Copy the script to temp directory
-        try fileManager.copyItem(atPath: resourcePath, toPath: tempScriptPath)
-        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempScriptPath)
+        // Verify script is executable
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: scriptPath, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              fileManager.isExecutableFile(atPath: scriptPath) else {
+            log.log("Uninstallation script is not executable at path: \(scriptPath)", level: Logger.Level.error)
+            throw NSError(domain: "CUPSError", code: 11,
+                        userInfo: [NSLocalizedDescriptionKey: "Uninstallation script is not properly configured"])
+        }
         
-        // Create and configure the process
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        log.log("Starting uninstallation with NSAppleScript...", level: Logger.Level.info)
         
-        // Use AppleScript with explicit sudo command and proper path escaping
-        let scriptCommand = """
-        tell application "System Events"
-            activate
-            do shell script "sudo " & (quoted form of "\(tempScriptPath)") & " " & (quoted form of "\(bundlePath)") with administrator privileges
-        end tell
+        // Improved AppleScript with better error handling and timing
+        let scriptSource = """
+        on run
+            try
+                tell application "System Events"
+                    activate
+                    delay 2.0
+                end tell
+                
+                set scriptPath to "\(scriptPath.replacingOccurrences(of: "\"", with: "\\\""))"
+                
+                set command to "/usr/bin/sudo " & quoted form of scriptPath
+                
+                log "Executing command: " & command
+                
+                set output to do shell script command with administrator privileges
+                
+                if output contains "ERROR:" then
+                    error output
+                end if
+                
+                return output
+            on error errMsg
+                if errMsg contains "User canceled" then
+                    error "Uninstallation cancelled by user"
+                else if errMsg contains "not allowed to send keystrokes" then
+                    error "Failed to authenticate: System Events not authorized"
+                else
+                    error errMsg
+                end if
+            end try
+        end run
         """
-        task.arguments = ["-e", scriptCommand]
         
-        // Capture output and errors
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        task.standardOutput = outputPipe
-        task.standardError = errorPipe
+        log.log("AppleScript source prepared", level: Logger.Level.debug)
+        log.log("AppleScript source:\n\(scriptSource)", level: Logger.Level.debug)
         
-        do {
-            try task.run()
-            task.waitUntilExit()
-            
-            let status = task.terminationStatus
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-            let output = String(data: outputData, encoding: .utf8) ?? ""
-            
-            if status != 0 {
-                // Log both error and output for better debugging
-                print("Error output: \(errorOutput)")
-                print("Standard output: \(output)")
-                throw NSError(domain: "CUPSError", code: 12,
-                            userInfo: [NSLocalizedDescriptionKey: "Uninstallation failed. Please check your administrator password and try again."])
-            }
-            
-            isInstalled = false
-        } catch {
+        var error: NSDictionary?
+        guard let script = NSAppleScript(source: scriptSource) else {
             throw NSError(domain: "CUPSError", code: 13,
-                        userInfo: [NSLocalizedDescriptionKey: "Failed to run uninstallation script: \(error.localizedDescription)"])
+                        userInfo: [NSLocalizedDescriptionKey: "Failed to create AppleScript"])
         }
+        
+        log.log("Executing AppleScript...", level: Logger.Level.info)
+        let result = script.executeAndReturnError(&error)
+        
+        if let error = error {
+            log.log("AppleScript error: \(error)", level: Logger.Level.error)
+            let errorMessage = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
+            if errorMessage.contains("cancelled") || errorMessage.contains("canceled") {
+                throw NSError(domain: "CUPSError", code: 14,
+                            userInfo: [NSLocalizedDescriptionKey: "Uninstallation cancelled by user"])
+            } else if errorMessage.contains("not authorized") {
+                throw NSError(domain: "CUPSError", code: 15,
+                            userInfo: [NSLocalizedDescriptionKey: "System Events not authorized. Please grant permission in System Settings > Privacy & Security > Accessibility"])
+            } else {
+                throw NSError(domain: "CUPSError", code: 12,
+                            userInfo: [NSLocalizedDescriptionKey: "Uninstallation failed: \(errorMessage)"])
+            }
+        }
+        
+        if let output = result.stringValue {
+            log.log("Uninstallation output: \(output)", level: Logger.Level.info)
+            
+            if output.contains("ERROR:") {
+                throw NSError(domain: "CUPSError", code: 16,
+                            userInfo: [NSLocalizedDescriptionKey: "Uninstallation failed: \(output)"])
+            }
+        }
+        
+        isInstalled = false
+        log.log("Printer uninstallation completed successfully", level: Logger.Level.info)
     }
     
     func handleNewPDF(at spoolPath: String) {
@@ -258,7 +370,7 @@ class PrinterManager: ObservableObject {
                 do {
                     try fileManager.moveItem(at: sourceURL, to: uniqueURL)
                 } catch {
-                    print("Error moving PDF: \(error)")
+                    log.log("Error moving PDF: \(error)", level: Logger.Level.error)
                 }
             }
         } else {
@@ -276,7 +388,7 @@ class PrinterManager: ObservableObject {
                     do {
                         try self.fileManager.moveItem(at: sourceURL, to: targetURL)
                     } catch {
-                        print("Error saving PDF: \(error)")
+                        log.log("Error saving PDF: \(error)", level: Logger.Level.error)
                     }
                 }
             }
